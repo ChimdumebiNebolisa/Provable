@@ -47,6 +47,7 @@ Provable automatically collects receipt attachments from a Gmail inbox and organ
 4. Backend immediately triggers scan for last N days (MVP default: 60 days)
 5. User can click Scan Now anytime to trigger another scan
 6. On app open, if `last_scan_at` is older than `STALE_THRESHOLD` (e.g., 6 hours), app auto-triggers scan
+7. If a scan is already running for this user, additional triggers are rejected/debounced until completion
 
 ---
 

@@ -12,7 +12,8 @@ Three-week plan to deliver Provable with demo mode and real user mode. Prioritie
 
 | Task | Priority | Verification |
 |------|----------|--------------|
-| Create SQLite schema (users, gmail_accounts, receipts, sessions, scan_locks, settings) | Must | Schema applies; WAL mode enabled |
+| Create SQLite schema (users, gmail_accounts, receipts, sessions, settings) | Must | Schema applies; WAL mode enabled |
+| Add scan state fields on gmail_accounts (scan_in_progress, last_scan_at, last_scan_error optional) | Must | Fields present; usable for scan gating/status |
 | Enable WAL mode on DB connection | Must | `PRAGMA journal_mode=WAL` returns WAL |
 | Set up Railway volume path for PDFs | Must | Path writable at runtime |
 | Create /app/storage/demo_exports/ for prebuilt demo ZIPs | Must | Dir exists; writable |
@@ -40,8 +41,9 @@ Three-week plan to deliver Provable with demo mode and real user mode. Prioritie
 | Implement /auth/callback with state validation | Must | Rejects invalid state; exchanges code |
 | Encrypt refresh token with Fernet; store in gmail_accounts.refresh_token_encrypted | Must | Token not stored in plaintext |
 | Create session for real user after OAuth | Must | Session cookie set; user can access receipts |
+| Enforce one Gmail account per user (DB UNIQUE(user_id) or code guard) | Must | Second link attempt rejected or replaced deterministically |
 
-**Acceptance:** OAuth completes; tokens encrypted; real user session works.
+**Acceptance:** OAuth completes; tokens encrypted; real user session works; one Gmail account per user enforced.
 
 ### Week 1 Day-by-Day (Grouped)
 
@@ -56,27 +58,29 @@ Three-week plan to deliver Provable with demo mode and real user mode. Prioritie
 
 ## Week 2: Scanning and Receipt Detection
 
-### Milestone 2.1: Internal Scan Endpoint
+### Milestone 2.1: Scan Triggering and Guarding (Session)
 
 | Task | Priority | Verification |
 |------|----------|--------------|
-| Implement POST /internal/scan | Must | Returns 200 with {"scanned": N} and returns 401 without X-Cron-Secret (use scanned count for manual testing) |
-| Validate X-Cron-Secret header | Must | Wrong/missing secret returns 401 |
-| Use scan_locks(id=1,last_run) as a 5 minute gate | Must | Reject if last_run within 5 minutes; prevents overlapping runs by rejecting calls inside the window; single instance; no distributed locking |
-| Scan only non-demo accounts with status connected_active; cap 50 accounts per run | Must | Demo users skipped; cap enforced |
+| Implement POST /scan (Session) to scan last N days for current user connected Gmail account | Must | Authenticated call triggers scan and returns scan outcome |
+| Optional: implement GET /scan/status (Session) for current scan state | Optional | Returns current user scan status (idle/running/last outcome) when implemented |
+| Implement per-user scan guard (DB flag or in-memory) to prevent concurrent scans | Must | Second scan while active returns 409 or 429 with clear message |
+| Optional: add per-user scan rate limit (e.g., 1 scan per 2 minutes) if easy | Optional | Rapid repeated calls are throttled when enabled |
+| Implement auto-scan on connect (OAuth callback kicks off scan) | Must | First real account link triggers scan automatically |
+| Implement auto-scan on open if stale (e.g., on /receipts or app load) | Must | If `last_scan_at` older than `STALE_THRESHOLD`, scan is triggered |
 
-**Acceptance:** Cron endpoint protected; scan_locks enforces a 5 minute minimum interval and prevents overlapping runs by rejecting calls within that window.
+**Acceptance:** Manual Scan Now works end-to-end; second scan request during active scan is rejected; auto-scan runs on connect and on open when stale.
 
-### Milestone 2.2: Gmail Fetch and Incremental Scan
+### Milestone 2.2: Gmail Fetch (Fixed Window)
 
 | Task | Priority | Verification |
 |------|----------|--------------|
-| Fetch messages from Gmail with date filter | Must | API calls use date range query |
-| Apply overlap window to date range | Must | Range extended by N days for edge cases |
-| Store last_scan_at per account in gmail_accounts | Must | Next scan starts from last_scan_at - overlap |
+| Fetch messages from Gmail using fixed date filter (last 30 or 60 days) | Must | API calls always use fixed window query |
+| Use Gmail internalDate for receipt_date | Must | Stored receipt dates come from Gmail internalDate |
+| Store last_scan_at at end of scan | Must | `last_scan_at` updates on successful scan completion |
 | Use short transactions | Must | No long-held locks |
 
-**Acceptance:** Incremental scan works; no duplicate full scans.
+**Acceptance:** Queries use fixed window; `last_scan_at` updates correctly.
 
 ### Milestone 2.3: Receipt Detection and Deduplication
 
@@ -94,8 +98,8 @@ Three-week plan to deliver Provable with demo mode and real user mode. Prioritie
 
 | Day | Focus | Tasks |
 |-----|-------|-------|
-| 1 | Internal | POST /internal/scan, X-Cron-Secret, scan_locks rate limit |
-| 2-3 | Gmail | Fetch messages, incremental scan, overlap window |
+| 1 | Scan API | POST /scan (Session), per-user scan guard, optional rate limit |
+| 2-3 | Triggers + Gmail | Auto-scan on connect, auto-scan on open if stale, fixed-window fetch |
 | 4 | Receipts | Scoring, SHA256 dedupe, internalDate |
 | 5 | Integration | Full scan cycle; verify deduplication |
 
@@ -119,7 +123,8 @@ Three-week plan to deliver Provable with demo mode and real user mode. Prioritie
 
 | Task | Priority | Verification |
 |------|----------|--------------|
-| Implement POST /auth/disconnect | Must | Revokes token best-effort; deletes real user data |
+| Implement POST /auth/disconnect | Must | Deletes real user data and clears session |
+| Optional: revoke token best-effort (if time) | Optional | Revoke attempted when configured; failures do not block cleanup |
 | Delete user PDF files from volume | Must | Files removed |
 | Delete user rows from receipts, gmail_accounts, and users | Must | DB cleaned |
 | Clear session | Must | User logged out |
@@ -141,7 +146,7 @@ Three-week plan to deliver Provable with demo mode and real user mode. Prioritie
 | Day | Focus | Tasks |
 |-----|-------|-------|
 | 1 | Export | Real user ZIP, validation, caps |
-| 2 | Disconnect | Revoke, delete files, delete rows |
+| 2 | Disconnect | Delete files, delete rows, clear session; optional revoke |
 | 3 | Deploy | Prebuild exports, seed script, idempotency |
 | 4-5 | QA | End-to-end demo; end-to-end real user; edge cases |
 
@@ -151,7 +156,7 @@ Three-week plan to deliver Provable with demo mode and real user mode. Prioritie
 
 | Priority | Items |
 |----------|-------|
-| Must | All demo mode, OAuth, scan, dedupe, export, disconnect, security |
+| Must | All demo mode, OAuth, one-Gmail-account enforcement, /scan triggers, scan guard + stale gating, fixed-window fetch, dedupe, export, disconnect cleanup |
 | Optional | Amount parsing for top 3 vendors |
 
 ---
@@ -161,7 +166,8 @@ Three-week plan to deliver Provable with demo mode and real user mode. Prioritie
 | Risk | Mitigation |
 |------|------------|
 | Gmail API quota during demo | Demo mode never calls Gmail; pre-seeded data only |
-| Cron endpoint exposed | Require X-Cron-Secret; fail closed on missing/wrong |
-| Scan lock deadlock | Use short transactions; timeout on lock acquire |
+| OAuth consent screen / redirect URI misconfig | Demo mode unaffected; maintain test user list; use single stable callback URI |
+| Long scan blocks request | Run scan as background job where possible or show UI loading state; fixed window reduces scan time |
+| Repeated auto-scan loops | Enforce stale threshold gating and `scan_in_progress` guard |
 | Demo reset deletes demo data | Explicit guard: reset only clears session; never DELETE demo rows/files |
 | Path traversal in export | Regex ^\d{4}-(0[1-9]|1[0-2])$; reject path traversal |

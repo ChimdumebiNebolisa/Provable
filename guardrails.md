@@ -25,8 +25,8 @@ Non-negotiable rules for demo reliability, data safety, correctness, and scope. 
 |------|-----------|
 | Refresh tokens encrypted at rest | Fernet encryption before DB insert in gmail_accounts.refresh_token_encrypted |
 | OAuth state validated on callback | Reject callback if state does not match session/cookie |
-| Cron endpoint protected | Static X-Cron-Secret header only; return 401 if missing or wrong |
-| Static cron secret only | No dynamic HMAC; env var compared as string |
+| Scan endpoint is session-protected | POST /scan requires valid session cookie; reject unauthenticated requests |
+| Prevent scan abuse | Use per-user scan_in_progress guard and optional per-user timestamp rate limit (for example, 1 scan per 2 minutes) |
 | Month validation | Validate month with regex `^\d{4}-(0[1-9]|1[0-2])$`. If it fails, reject. If it passes, parse with %Y-%m. Construct export filename from validated month only. No user-controlled path segments are used. Defense in depth: reject inputs containing `..`, `/`, or `\`. |
 | Session cookies hardened | HttpOnly, SameSite=Lax, Secure in production |
 
@@ -40,7 +40,8 @@ Non-negotiable rules for demo reliability, data safety, correctness, and scope. 
 | Deduplication is file-level | Hash of PDF bytes; same content = same hash |
 | Seeding is idempotent | Seed script can run multiple times without corrupting data |
 | Disconnect deletes all user data | Delete receipts, gmail_accounts, users rows; delete PDF files |
-| Disconnect revokes token best-effort | Call revoke endpoint; proceed with deletion even if revoke fails |
+| Disconnect revokes token best-effort (Optional) | Attempt token revoke, but never block user data deletion or session clear on revoke failure |
+| Never fake success on Gmail failures | If Gmail API calls fail, return explicit error state to UI; do not fall back to demo data and do not silently succeed |
 | Receipt scoring explicit | KNOWN_VENDORS +3, invoice/receipt +2 each, negative terms -2, non-PDF/image -2; score >= 4 save high_confidence; score 3 review queue; score <= 2 skip |
 
 ---
@@ -51,10 +52,13 @@ Non-negotiable rules for demo reliability, data safety, correctness, and scope. 
 |------|-----------|
 | SQLite runs in WAL mode | `PRAGMA journal_mode=WAL` on connection |
 | Short transactions | No long-held locks; commit quickly |
-| Scan gate for /internal/scan | scan_locks(id=1,last_run) enforces a 5 minute minimum interval and prevents overlapping runs by rejecting calls within that window; single instance; no distributed locking |
-| Rate limiting storage | scan_locks is the DB-backed gate; no separate rate limiting table |
-| Scan scope | Only non-demo accounts with status connected_active; cap 50 accounts per run |
-| /internal/scan response for manual testing | Returns 200 with {"scanned": N} on success |
+| Scan trigger is in-app `POST /scan` | Session-authenticated endpoint starts scan for current real user account |
+| Auto-scan on connect | OAuth callback triggers initial scan for connected real user |
+| Auto-scan on open if stale | On app open, trigger scan only when `last_scan_at + STALE_THRESHOLD` is stale (for example, 6 hours) |
+| Per-user scan concurrency guard | Use `gmail_accounts.scan_in_progress` (or equivalent) to reject overlapping scans for the same user |
+| Optional per-user scan rate limit | Enforce a timestamp-based minimum interval per user (for example, 1 scan per 2 minutes), using per-user timestamps |
+| Fixed window scan | Scan only the last N days (30 or 60) to keep latency bounded |
+| Scan error handling | On failure, set `last_scan_error`, clear `scan_in_progress`, and avoid partially inserting inconsistent rows |
 | Export caps for real users | max_files = 500, max_size_mb = 100 per export |
 | Single instance assumed | No distributed locking; hackathon scope |
 
@@ -66,7 +70,7 @@ We are **not** building:
 
 - Support for more than 5 real users (Gmail Testing mode limit)
 - Multi-instance or horizontal scaling
-- HMAC or signed cron requests
+- Multi-account per user in MVP
 - Amount parsing for all vendors (only top 3 best-effort)
 - Receipt date extraction from PDF body (use Gmail internalDate primarily)
 - SMTP or non-Gmail email sources

@@ -2,7 +2,7 @@
 
 ## Overview
 
-Provable automatically collects receipt attachments from a Gmail inbox and organizes them by month and vendor. The system operates in two modes: demo mode (Gmail-independent, instant) and real user mode (Gmail OAuth in Testing mode, 5 test users). Background scanning is triggered by an external cron service.
+Provable automatically collects receipt attachments from a Gmail inbox and organizes them by month and vendor. The system operates in two modes: demo mode (Gmail-independent, instant) and real user mode (Gmail OAuth in Testing mode, 5 test users). Automation is triggered in-app on connect, on open if stale, and with manual Scan Now.
 
 **Core product promise:** Provable automatically collects receipt attachments from your inbox and organizes them by month and vendor.
 
@@ -13,12 +13,12 @@ Provable automatically collects receipt attachments from a Gmail inbox and organ
 - Support real users via Gmail OAuth with encrypted token storage
 - Export receipts by month as ZIP files (demo prebuilt, real user generated)
 - Use conservative receipt detection with precision over recall
+- Automation triggers are in-app: on connect, on open if stale, and manual Scan Now
 
 ## Non-Goals
 
 - Supporting more than 5 real users (Testing mode limit)
-- Scaling beyond a single instance
-- HMAC or dynamic cron authentication
+- Scaling beyond a single instance for hackathon MVP
 - Amount parsing for all vendors (only top 3 best-effort)
 - Receiving email via SMTP or other non-Gmail sources
 
@@ -44,8 +44,9 @@ Provable automatically collects receipt attachments from a Gmail inbox and organ
 1. User selects Connect Gmail
 2. OAuth flow redirects to Google, returns with code
 3. Backend exchanges code for tokens, encrypts refresh token with Fernet, stores in gmail_accounts
-4. Initial scan triggered (or user triggers manually)
-5. Cron calls `/internal/scan` periodically to refresh
+4. Backend immediately triggers scan for last N days (MVP default: 60 days)
+5. User can click Scan Now anytime to trigger another scan
+6. On app open, if `last_scan_at` is older than `STALE_THRESHOLD` (e.g., 6 hours), app auto-triggers scan
 
 ---
 
@@ -59,6 +60,8 @@ flowchart TB
 
     subgraph backend [Backend]
         API[API Server]
+        Runner[Scan Runner]
+        Scheduler[In-App Triggers]
     end
 
     subgraph storage [Storage]
@@ -69,11 +72,12 @@ flowchart TB
 
     subgraph external [External]
         Gmail[Gmail API]
-        CronService[External Cron]
     end
 
     Browser --> API
-    CronService -->|X-Cron-Secret POST /internal/scan| API
+    API --> Scheduler
+    Scheduler --> Runner
+    API --> Runner
     API --> SQLite
     API --> Volume
     API --> Exports
@@ -81,9 +85,10 @@ flowchart TB
 ```
 
 - **Frontend:** Serves UI, calls public API endpoints, uses session cookies for auth
-- **Backend:** Handles OAuth, scan logic, export generation, internal cron endpoint
+- **Backend:** Handles OAuth, scan logic, export generation, and in-app scan triggers (on connect, on open if stale, manual Scan Now)
+- **Scheduler:** Triggered in-app from connect/open/manual events; no external cron dependency
+- **Scan runner:** Runs scan work off request thread when available; MVP may run synchronously with explicit UI loading/progress state
 - **Storage:** SQLite for metadata, Railway volume for PDFs, prebuilt demo ZIPs on disk
-- **Cron:** External service hits `/internal/scan` with `X-Cron-Secret` header
 
 ---
 
@@ -100,14 +105,10 @@ flowchart TB
 | GET | /auth/callback | None | OAuth callback with state validation |
 | POST | /auth/disconnect | Session | Revoke best-effort, delete real user data, clear session |
 | GET | /receipts | Session | List receipts for current session user |
+| POST | /scan | Session | Trigger scan now for connected Gmail account |
+| GET | /scan/status | Session | Optional: poll scan status/progress for current user |
 | GET | /export/{month} | Session | Download export for YYYY-MM |
 | GET | /health | None | Health check |
-
-### Internal Endpoints
-
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| POST | /internal/scan | X-Cron-Secret | Trigger background scan; non-demo accounts with status connected_active only; cap 50 per run |
 
 ### Request and Response Shapes
 
@@ -120,16 +121,20 @@ flowchart TB
 - Path param: `month` must match `^\d{4}-(0[1-9]|1[0-2])$` (YYYY-MM); parsed with %Y-%m
 - Response: ZIP binary, or 404 if no receipts for month
 
-**POST /internal/scan**
+**POST /scan**
 
-- Headers: `X-Cron-Secret: <static-secret>`
-- Response: `200` with body `{ "scanned": N }`, `401` if secret invalid, or `429` if called within 5 minutes of the prior run (scan_locks gate)
+- Behavior: trigger scan for currently connected Gmail account for fixed lookback window (MVP default: 60 days)
+- Response: `202` with body `{ "status": "started" }` when accepted, `409` if scan already in progress for this user, `429` if user-level Scan Now rate limit is hit (optional), `400` if no connected account, `502` if Gmail API fails during synchronous mode
+
+**GET /scan/status** (optional)
+
+- Response: `{ "scan_in_progress": false, "last_scan_at": "2026-02-18T12:00:00Z", "last_scan_status": "ok", "last_scan_error": null }`
+- Optional endpoint for background-scan UX; not required if scan runs synchronously with loading UI
 
 ### Auth Mechanism
 
 - **Demo:** Session cookie marks user as demo (users.is_demo = 1); no OAuth; demo endpoints never call Gmail API; demo data served from seeded DB and disk
 - **Real:** Session cookie after OAuth; refresh token stored encrypted in gmail_accounts
-- **Internal:** `X-Cron-Secret` header must match env var; no cookies
 
 ### Cookies
 
@@ -162,11 +167,14 @@ users(
 ```sql
 gmail_accounts(
   id INTEGER PRIMARY KEY,
-  user_id INTEGER NOT NULL REFERENCES users(id),
+  user_id INTEGER NOT NULL UNIQUE REFERENCES users(id),
   google_user_id TEXT UNIQUE,
   email TEXT NOT NULL,
   refresh_token_encrypted TEXT,
   last_scan_at TIMESTAMP,
+  scan_in_progress BOOLEAN DEFAULT 0,
+  last_scan_error TEXT NULL,
+  last_scan_status TEXT NULL, -- e.g. 'ok', 'error'
   status TEXT DEFAULT 'connected_active',
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 )
@@ -206,15 +214,6 @@ sessions(
   user_id INTEGER NOT NULL REFERENCES users(id),
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   expires_at TIMESTAMP
-)
-```
-
-**scan_locks**
-
-```sql
-scan_locks(
-  id INTEGER PRIMARY KEY CHECK (id = 1),
-  last_run TIMESTAMP NOT NULL
 )
 ```
 
@@ -271,14 +270,20 @@ Explicit scoring rules:
 
 ## Incremental Scanning Strategy
 
-- Use Gmail API `list` with `q` filter for date range
-- Query: `after:YYYY/MM/DD before:YYYY/MM/DD` (or equivalent)
-- **Overlap window:** Extend range by N days on each side to catch edge cases
-- Store `last_scan_at` per account in `gmail_accounts`; next scan starts from last_scan_at - overlap
-- Scan only non-demo accounts with `status = 'connected_active'`
-- Cap scan to 50 accounts per run
-- `scan_locks(id=1,last_run)` enforces a 5 minute minimum interval and prevents overlapping runs by rejecting calls within that window; single instance assumed; no distributed locking
-- Short transactions; update scan_locks.last_run when the run completes
+- Fixed window scan for MVP: last 60 days (configurable to 30 or 60)
+- Use Gmail API `list` with `q` filter, e.g. `after:YYYY/MM/DD`
+- Store `last_scan_at` in `gmail_accounts` for stale-check gating
+- Trigger scan automatically on connect, on app open when stale, and manually via `POST /scan`
+- Stale auto-scan gate: if `last_scan_at < now - STALE_THRESHOLD` (example threshold: 6 hours)
+- Use per-user scan guard (`scan_in_progress`) to prevent concurrent scans for the same user
+- Keep transactions bounded so failed scans do not leave partial inserts
+
+## Future Enhancements
+
+- External cron support for scheduled scans across many users
+- Overlap-window incremental scanning based on moving high-water marks
+- Multi-account support per user
+- Robust job queue with retries, dead-letter handling, and worker autoscaling
 
 ---
 
@@ -306,7 +311,8 @@ Explicit scoring rules:
 | OAuth state | Validate state cookie/session on callback; reject mismatches |
 | Token storage | Fernet encrypt refresh token; store in gmail_accounts.refresh_token_encrypted |
 | Cookies | HttpOnly, SameSite=Lax, Secure in prod |
-| Cron endpoint | Static X-Cron-Secret header only; 401 if missing or wrong; no dynamic HMAC |
+| Scan concurrency | Per-user scan guard via `scan_in_progress` prevents concurrent scans for same user |
+| Scan abuse control | Optional per-user Scan Now rate limit (e.g., once every 2 minutes) |
 | Month validation | Validate month with regex `^\d{4}-(0[1-9]|1[0-2])$`. If it fails, reject. If it passes, parse with %Y-%m. Construct export filename from validated month only. No user-controlled path segments are used. Defense in depth: reject inputs containing `..`, `/`, or `\`. |
 | Disconnect | Revoke token best-effort; delete user files and DB rows |
 
@@ -316,27 +322,22 @@ Explicit scoring rules:
 
 ### Week 1
 
-- [ ] SQLite schema created with WAL mode
-- [ ] Demo mode serves seeded receipts and PDFs; zero Gmail calls
-- [ ] Demo export serves prebuilt ZIPs
-- [ ] OAuth flow completes; tokens encrypted and stored
-- [ ] Basic receipt listing by month and vendor
+- [ ] Demo mode works end-to-end with seeded receipts and prebuilt demo exports
+- [ ] Receipt listing grouped by month and vendor
+- [ ] Month export download works in demo
 
 ### Week 2
 
-- [ ] POST /internal/scan protected by X-Cron-Secret
-- [ ] Scan uses scan_locks(id=1,last_run) to enforce a 5 minute minimum interval and prevent overlapping runs by rejecting calls within that window (single instance; no distributed locking)
-- [ ] Scan only non-demo accounts with status connected_active; cap 50 accounts per run
-- [ ] Incremental scan with date filter and overlap window
-- [ ] Receipt scoring implemented (explicit rules)
-- [ ] SHA256 deduplication per user
+- [ ] OAuth works for 1 test user (Testing mode)
+- [ ] POST /scan triggers scan for last N days and stores receipts with scoring and SHA256 dedupe
+- [ ] Auto-scan on connect works
+- [ ] Auto-scan on open if stale works (`STALE_THRESHOLD` defined, default 6 hours)
 
 ### Week 3
 
-- [ ] Real user export with max_files=500, max_size_mb=100
-- [ ] POST /auth/disconnect revokes token and deletes real user data
-- [ ] POST /demo/reset clears session only; demo receipts and demo exports at /app/storage/demo_exports/ remain
-- [ ] All acceptance criteria verified end-to-end
+- [ ] Real export generation with max_files=500, max_size_mb=100
+- [ ] Disconnect clears session and deletes local data; token revoke is best-effort and optional
+- [ ] End-to-end flow verified in demo mode and at least one real OAuth account
 
 ---
 
@@ -347,9 +348,12 @@ Explicit scoring rules:
 3. User visits, clicks Demo (POST /demo); sees receipts immediately from seeded DB
 4. User downloads export for a month; gets prebuilt ZIP
 5. User clicks Reset (POST /demo/reset); session clears; demo data and exports remain
+6. Optional real-mode proof: connect one Gmail test account, auto-scan runs on connect, user can click Scan Now, and stale-open auto-scan triggers after threshold
 
 ### Failure-Safe Behavior
 
 - If prebuilt export missing for requested month: return 404; do not fall back to Gmail
 - If demo data missing: show empty state; do not call Gmail API
 - Demo reset: only clear session; never run DELETE on demo receipts or export files
+- If Gmail API scan fails: show explicit error in UI/API; do not silently fall back to demo
+- On scan failure: do not partially insert receipt rows; leave prior good data intact and set `last_scan_status='error'` with `last_scan_error`

@@ -20,6 +20,8 @@ def build_settings(tmp_path):
         oauth_state_cookie_name="provable_oauth_state",
         demo_session_ttl_minutes=30,
         real_session_ttl_hours=24,
+        stale_threshold_hours=6,
+        scan_window_days=60,
         google_client_id="test-google-client-id",
         google_client_secret="test-google-client-secret",
         google_redirect_uri="http://localhost/auth/callback",

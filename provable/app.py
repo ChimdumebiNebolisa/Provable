@@ -7,6 +7,7 @@ from .config import Settings
 from .demo_seed import seed_demo_data
 from .oauth import GoogleOAuthClient
 from .routes import register_routes
+from .scan import NoOpScanExecutor, ScanManager
 
 
 def create_app(settings: Settings | None = None) -> Flask:
@@ -19,6 +20,10 @@ def create_app(settings: Settings | None = None) -> Flask:
         SECRET_KEY=resolved_settings.secret_key,
         PROVABLE_SETTINGS=resolved_settings,
         PROVABLE_OAUTH_CLIENT=GoogleOAuthClient(resolved_settings),
+        PROVABLE_SCAN_MANAGER=ScanManager(
+            settings=resolved_settings,
+            executor=NoOpScanExecutor(),
+        ),
     )
     register_routes(app)
 

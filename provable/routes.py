@@ -154,6 +154,7 @@ def register_routes(app: Flask) -> None:
         response = redirect("/", code=302)
         _set_session_cookie(response, session.session_id, settings)
         _clear_oauth_state_cookie(response, settings)
+        _scan_manager().start_scan(user_id=user_id, trigger="connect", only_if_stale=False)
         return response
 
     @app.post("/demo/reset")
@@ -178,6 +179,12 @@ def register_routes(app: Flask) -> None:
         session, response = _require_session()
         if response is not None:
             return response
+        if not session.is_demo:
+            _scan_manager().start_scan(
+                user_id=session.user_id,
+                trigger="open",
+                only_if_stale=True,
+            )
 
         with connect_database(settings.database_path) as connection:
             rows = connection.execute(
@@ -216,6 +223,49 @@ def register_routes(app: Flask) -> None:
 
         months = sorted(by_month.keys(), reverse=True)
         return jsonify({"months": months, "byMonth": {month: by_month[month] for month in months}})
+
+    @app.post("/scan")
+    def trigger_scan():
+        session, response = _require_session()
+        if response is not None:
+            return response
+        if session.is_demo:
+            return jsonify({"error": "gmail_account_required"}), 400
+
+        status = _scan_manager().start_scan(
+            user_id=session.user_id,
+            trigger="manual",
+            only_if_stale=False,
+        )
+        if status == "started":
+            return jsonify({"status": "started"}), 202
+        if status == "already_running":
+            return jsonify({"error": "scan_in_progress"}), 409
+        if status == "missing_account":
+            return jsonify({"error": "gmail_account_required"}), 400
+
+        return jsonify({"error": status}), 400
+
+    @app.get("/scan/status")
+    def scan_status():
+        session, response = _require_session()
+        if response is not None:
+            return response
+        if session.is_demo:
+            return jsonify({"error": "gmail_account_required"}), 400
+
+        status = _scan_manager().get_status(user_id=session.user_id)
+        if status is None:
+            return jsonify({"error": "gmail_account_required"}), 400
+
+        return jsonify(
+            {
+                "scan_in_progress": status.scan_in_progress,
+                "last_scan_at": status.last_scan_at,
+                "last_scan_status": status.last_scan_status,
+                "last_scan_error": status.last_scan_error,
+            }
+        )
 
     @app.get("/export/<month>")
     def export_month(month: str):
@@ -265,6 +315,10 @@ def _settings() -> Settings:
 
 def _oauth_client():
     return current_app.config["PROVABLE_OAUTH_CLIENT"]
+
+
+def _scan_manager():
+    return current_app.config["PROVABLE_SCAN_MANAGER"]
 
 
 def _set_session_cookie(response, session_id: str, settings: Settings) -> None:

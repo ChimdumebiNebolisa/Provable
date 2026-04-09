@@ -4,7 +4,7 @@ from collections import defaultdict
 import secrets
 from datetime import timedelta
 
-from flask import Flask, current_app, jsonify, redirect, request, send_file
+from flask import Flask, current_app, jsonify, redirect, render_template_string, request, send_file
 
 from .config import Settings
 from .crypto import CryptoConfigError, decrypt_refresh_token, encrypt_refresh_token
@@ -19,7 +19,28 @@ from .validators import validate_month
 def register_routes(app: Flask) -> None:
     @app.get("/")
     def landing():
-        return jsonify({"name": "Provable", "status": "ok"})
+        return render_template_string(
+            """
+            <!doctype html>
+            <html lang="en">
+              <head>
+                <meta charset="utf-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1">
+                <title>Provable</title>
+              </head>
+              <body>
+                <main>
+                  <h1>Provable</h1>
+                  <p>Collect receipt attachments from Gmail and organize them by month.</p>
+                  <form method="post" action="/demo">
+                    <button type="submit">Enter Demo</button>
+                  </form>
+                  <p><a href="/auth/login">Connect Gmail</a></p>
+                </main>
+              </body>
+            </html>
+            """
+        )
 
     @app.get("/health")
     def health():

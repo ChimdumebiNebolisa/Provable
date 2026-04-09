@@ -5,6 +5,7 @@ from flask import Flask
 from .bootstrap import bootstrap_environment
 from .config import Settings
 from .demo_seed import seed_demo_data
+from .oauth import GoogleOAuthClient
 from .routes import register_routes
 
 
@@ -17,6 +18,7 @@ def create_app(settings: Settings | None = None) -> Flask:
     app.config.update(
         SECRET_KEY=resolved_settings.secret_key,
         PROVABLE_SETTINGS=resolved_settings,
+        PROVABLE_OAUTH_CLIENT=GoogleOAuthClient(resolved_settings),
     )
     register_routes(app)
 

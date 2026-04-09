@@ -30,8 +30,13 @@ class Settings:
     demo_exports_root: Path
     user_storage_root: Path
     session_cookie_name: str
+    oauth_state_cookie_name: str
     demo_session_ttl_minutes: int
     real_session_ttl_hours: int
+    google_client_id: str
+    google_client_secret: str
+    google_redirect_uri: str
+    fernet_key: str
 
     @property
     def is_production(self) -> bool:
@@ -57,6 +62,14 @@ class Settings:
             demo_exports_root=storage_root / "demo_exports",
             user_storage_root=storage_root / "users",
             session_cookie_name=os.getenv("PROVABLE_SESSION_COOKIE_NAME", "provable_session"),
+            oauth_state_cookie_name=os.getenv(
+                "PROVABLE_OAUTH_STATE_COOKIE_NAME",
+                "provable_oauth_state",
+            ),
             demo_session_ttl_minutes=int(os.getenv("PROVABLE_DEMO_SESSION_TTL_MINUTES", "30")),
             real_session_ttl_hours=int(os.getenv("PROVABLE_REAL_SESSION_TTL_HOURS", "24")),
+            google_client_id=os.getenv("GOOGLE_CLIENT_ID", ""),
+            google_client_secret=os.getenv("GOOGLE_CLIENT_SECRET", ""),
+            google_redirect_uri=os.getenv("GOOGLE_REDIRECT_URI", ""),
+            fernet_key=os.getenv("FERNET_KEY", ""),
         )

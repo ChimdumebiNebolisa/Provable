@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 from collections import defaultdict
+import secrets
 from datetime import timedelta
 
-from flask import Flask, current_app, jsonify, make_response, request, send_file
+from flask import Flask, current_app, jsonify, redirect, request, send_file
 
 from .config import Settings
+from .crypto import CryptoConfigError, encrypt_refresh_token
 from .db import connect_database
 from .demo_seed import DEMO_USER_EMAIL
+from .oauth import OAuthConfigError
 from .session_store import create_session, delete_session, get_current_session
 from .validators import validate_month
 
@@ -40,6 +43,117 @@ def register_routes(app: Flask) -> None:
 
         response = jsonify({"status": "demo_session_created"})
         _set_session_cookie(response, session.session_id, settings)
+        return response
+
+    @app.get("/auth/login")
+    def auth_login():
+        settings = _settings()
+        oauth_client = _oauth_client()
+        state = secrets.token_urlsafe(32)
+
+        try:
+            authorization_url = oauth_client.build_authorization_url(state)
+        except OAuthConfigError as exc:
+            return jsonify({"error": str(exc)}), 503
+
+        response = redirect(authorization_url, code=302)
+        _set_oauth_state_cookie(response, state, settings)
+        return response
+
+    @app.get("/auth/callback")
+    def auth_callback():
+        settings = _settings()
+        oauth_client = _oauth_client()
+        callback_state = request.args.get("state", "")
+        cookie_state = request.cookies.get(settings.oauth_state_cookie_name, "")
+
+        if not callback_state or not cookie_state or callback_state != cookie_state:
+            response = jsonify({"error": "invalid_oauth_state"})
+            _clear_oauth_state_cookie(response, settings)
+            return response, 400
+
+        if request.args.get("error"):
+            response = jsonify(
+                {
+                    "error": "oauth_error",
+                    "detail": request.args.get("error"),
+                }
+            )
+            _clear_oauth_state_cookie(response, settings)
+            return response, 400
+
+        code = request.args.get("code")
+        if not code:
+            response = jsonify({"error": "missing_oauth_code"})
+            _clear_oauth_state_cookie(response, settings)
+            return response, 400
+
+        try:
+            tokens = oauth_client.exchange_code(code)
+            identity = oauth_client.fetch_identity(tokens.access_token)
+            refresh_token_encrypted = encrypt_refresh_token(tokens.refresh_token, settings.fernet_key)
+        except OAuthConfigError as exc:
+            response = jsonify({"error": str(exc)})
+            _clear_oauth_state_cookie(response, settings)
+            return response, 503
+        except CryptoConfigError as exc:
+            response = jsonify({"error": str(exc)})
+            _clear_oauth_state_cookie(response, settings)
+            return response, 503
+        except Exception as exc:
+            response = jsonify({"error": "oauth_exchange_failed", "detail": str(exc)})
+            _clear_oauth_state_cookie(response, settings)
+            return response, 502
+
+        with connect_database(settings.database_path) as connection:
+            connection.execute(
+                """
+                INSERT INTO users(email, is_demo)
+                VALUES(?, 0)
+                ON CONFLICT(email) DO UPDATE SET is_demo = 0
+                """,
+                (identity.email,),
+            )
+            user_id = int(
+                connection.execute(
+                    "SELECT id FROM users WHERE email = ?",
+                    (identity.email,),
+                ).fetchone()["id"]
+            )
+
+            connection.execute(
+                """
+                INSERT INTO gmail_accounts(
+                  user_id,
+                  google_user_id,
+                  email,
+                  refresh_token_encrypted,
+                  status
+                )
+                VALUES(?, ?, ?, ?, 'connected_active')
+                ON CONFLICT(user_id) DO UPDATE SET
+                  google_user_id = excluded.google_user_id,
+                  email = excluded.email,
+                  refresh_token_encrypted = excluded.refresh_token_encrypted,
+                  status = excluded.status
+                """,
+                (
+                    user_id,
+                    identity.google_user_id,
+                    identity.email,
+                    refresh_token_encrypted,
+                ),
+            )
+            connection.commit()
+            session = create_session(
+                connection,
+                user_id=user_id,
+                ttl=timedelta(hours=settings.real_session_ttl_hours),
+            )
+
+        response = redirect("/", code=302)
+        _set_session_cookie(response, session.session_id, settings)
+        _clear_oauth_state_cookie(response, settings)
         return response
 
     @app.post("/demo/reset")
@@ -149,10 +263,38 @@ def _settings() -> Settings:
     return current_app.config["PROVABLE_SETTINGS"]
 
 
+def _oauth_client():
+    return current_app.config["PROVABLE_OAUTH_CLIENT"]
+
+
 def _set_session_cookie(response, session_id: str, settings: Settings) -> None:
     response.set_cookie(
         settings.session_cookie_name,
         session_id,
+        httponly=True,
+        samesite="Lax",
+        secure=settings.is_production,
+        path="/",
+    )
+
+
+def _set_oauth_state_cookie(response, state: str, settings: Settings) -> None:
+    response.set_cookie(
+        settings.oauth_state_cookie_name,
+        state,
+        max_age=600,
+        httponly=True,
+        samesite="Lax",
+        secure=settings.is_production,
+        path="/",
+    )
+
+
+def _clear_oauth_state_cookie(response, settings: Settings) -> None:
+    response.set_cookie(
+        settings.oauth_state_cookie_name,
+        "",
+        expires=0,
         httponly=True,
         samesite="Lax",
         secure=settings.is_production,

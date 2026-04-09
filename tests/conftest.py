@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from cryptography.fernet import Fernet
 
 from provable.app import create_app
 from provable.config import Settings
@@ -17,8 +18,13 @@ def build_settings(tmp_path):
         demo_exports_root=storage_root / "demo_exports",
         user_storage_root=storage_root / "users",
         session_cookie_name="provable_session",
+        oauth_state_cookie_name="provable_oauth_state",
         demo_session_ttl_minutes=30,
         real_session_ttl_hours=24,
+        google_client_id="test-google-client-id",
+        google_client_secret="test-google-client-secret",
+        google_redirect_uri="http://localhost/auth/callback",
+        fernet_key=Fernet.generate_key().decode("utf-8"),
     )
 
 

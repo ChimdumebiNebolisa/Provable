@@ -16,6 +16,9 @@ def build_settings(tmp_path):
         demo_storage_root=storage_root / "demo",
         demo_exports_root=storage_root / "demo_exports",
         user_storage_root=storage_root / "users",
+        session_cookie_name="provable_session",
+        demo_session_ttl_minutes=30,
+        real_session_ttl_hours=24,
     )
 
 

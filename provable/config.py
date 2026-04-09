@@ -29,6 +29,9 @@ class Settings:
     demo_storage_root: Path
     demo_exports_root: Path
     user_storage_root: Path
+    session_cookie_name: str
+    demo_session_ttl_minutes: int
+    real_session_ttl_hours: int
 
     @property
     def is_production(self) -> bool:
@@ -53,4 +56,7 @@ class Settings:
             demo_storage_root=storage_root / "demo",
             demo_exports_root=storage_root / "demo_exports",
             user_storage_root=storage_root / "users",
+            session_cookie_name=os.getenv("PROVABLE_SESSION_COOKIE_NAME", "provable_session"),
+            demo_session_ttl_minutes=int(os.getenv("PROVABLE_DEMO_SESSION_TTL_MINUTES", "30")),
+            real_session_ttl_hours=int(os.getenv("PROVABLE_REAL_SESSION_TTL_HOURS", "24")),
         )

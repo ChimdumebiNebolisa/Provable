@@ -35,6 +35,8 @@ class Settings:
     real_session_ttl_hours: int
     stale_threshold_hours: int
     scan_window_days: int
+    real_export_max_files: int
+    real_export_max_size_mb: int
     google_client_id: str
     google_client_secret: str
     google_redirect_uri: str
@@ -72,6 +74,8 @@ class Settings:
             real_session_ttl_hours=int(os.getenv("PROVABLE_REAL_SESSION_TTL_HOURS", "24")),
             stale_threshold_hours=int(os.getenv("PROVABLE_STALE_THRESHOLD_HOURS", "6")),
             scan_window_days=int(os.getenv("PROVABLE_SCAN_WINDOW_DAYS", "60")),
+            real_export_max_files=int(os.getenv("PROVABLE_REAL_EXPORT_MAX_FILES", "500")),
+            real_export_max_size_mb=int(os.getenv("PROVABLE_REAL_EXPORT_MAX_SIZE_MB", "100")),
             google_client_id=os.getenv("GOOGLE_CLIENT_ID", ""),
             google_client_secret=os.getenv("GOOGLE_CLIENT_SECRET", ""),
             google_redirect_uri=os.getenv("GOOGLE_REDIRECT_URI", ""),

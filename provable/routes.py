@@ -10,6 +10,7 @@ from .config import Settings
 from .crypto import CryptoConfigError, encrypt_refresh_token
 from .db import connect_database
 from .demo_seed import DEMO_USER_EMAIL
+from .exporter import ExportLimitError, build_real_user_export
 from .oauth import OAuthConfigError
 from .session_store import create_session, delete_session, get_current_session
 from .validators import validate_month
@@ -279,7 +280,24 @@ def register_routes(app: Flask) -> None:
         except ValueError:
             return jsonify({"error": "invalid_month"}), 400
         if not session.is_demo:
-            return jsonify({"error": "real_export_not_implemented"}), 501
+            try:
+                export_buffer = build_real_user_export(
+                    settings=settings,
+                    user_id=session.user_id,
+                    month=validated_month,
+                )
+            except ExportLimitError as exc:
+                return jsonify({"error": str(exc)}), 400
+            except FileNotFoundError:
+                return jsonify({"error": "missing_receipt_file"}), 500
+            if export_buffer is None:
+                return jsonify({"error": "export_not_found"}), 404
+            return send_file(
+                export_buffer,
+                mimetype="application/zip",
+                as_attachment=True,
+                download_name=f"{validated_month}.zip",
+            )
 
         export_path = settings.demo_exports_root / f"{validated_month}.zip"
         if not export_path.exists():

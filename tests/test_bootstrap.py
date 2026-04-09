@@ -22,6 +22,8 @@ def build_settings(tmp_path):
         real_session_ttl_hours=24,
         stale_threshold_hours=6,
         scan_window_days=60,
+        real_export_max_files=500,
+        real_export_max_size_mb=100,
         google_client_id="test-google-client-id",
         google_client_secret="test-google-client-secret",
         google_redirect_uri="http://localhost/auth/callback",

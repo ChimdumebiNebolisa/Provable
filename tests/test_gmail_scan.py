@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import base64
 import sqlite3
+import zipfile
+from dataclasses import replace
 from dataclasses import dataclass, field
+from io import BytesIO
 from time import sleep
 from urllib.parse import parse_qs, urlparse
 
@@ -298,3 +301,51 @@ def test_scan_skips_distinct_gmail_ids_when_file_sha_matches(app, client, settin
 
     assert len(gmail_receipts) == 1
     assert gmail_receipts[0][0] == "message-1"
+
+
+def test_real_export_generates_zip_with_month_validation_and_caps(app, client, settings):
+    fake_oauth = FakeOAuthClient()
+    fake_gmail = FakeGmailClient()
+    app.config["PROVABLE_OAUTH_CLIENT"] = fake_oauth
+    app.config["PROVABLE_SCAN_MANAGER"] = ScanManager(
+        settings=settings,
+        executor=GmailScanExecutor(
+            settings=settings,
+            oauth_client=fake_oauth,
+            gmail_client=fake_gmail,
+        ),
+    )
+
+    _connect_real_user(client)
+    _wait_for_scan_completion(client)
+
+    ok_response = client.get("/export/2024-02")
+    assert ok_response.status_code == 200
+    with zipfile.ZipFile(BytesIO(ok_response.data)) as archive:
+        names = sorted(archive.namelist())
+        assert names == [
+            "2024-02/camera-mart/message-2-attachment-2.jpg",
+            "2024-02/example-store/message-1-attachment-1.pdf",
+        ]
+
+    invalid_month = client.get("/export/2024-13")
+    assert invalid_month.status_code == 400
+    assert invalid_month.get_json()["error"] == "invalid_month"
+
+    app.config["PROVABLE_SETTINGS"] = replace(
+        settings,
+        real_export_max_files=1,
+        real_export_max_size_mb=100,
+    )
+    over_file_limit = client.get("/export/2024-02")
+    assert over_file_limit.status_code == 400
+    assert over_file_limit.get_json()["error"] == "export_limit_exceeded_files"
+
+    app.config["PROVABLE_SETTINGS"] = replace(
+        settings,
+        real_export_max_files=500,
+        real_export_max_size_mb=0,
+    )
+    over_size_limit = client.get("/export/2024-02")
+    assert over_size_limit.status_code == 400
+    assert over_size_limit.get_json()["error"] == "export_limit_exceeded_size"

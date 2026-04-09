@@ -110,6 +110,16 @@ class GoogleOAuthClient:
         payload = response.json()
         return str(payload["access_token"])
 
+    def revoke_token(self, refresh_token: str) -> None:
+        self._ensure_configured()
+        response = self._session.post(
+            "https://oauth2.googleapis.com/revoke",
+            data={"token": refresh_token},
+            timeout=20,
+        )
+        if response.status_code not in (200, 400):
+            response.raise_for_status()
+
     def _ensure_configured(self) -> None:
         if not (
             self._settings.google_client_id

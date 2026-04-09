@@ -7,7 +7,7 @@ from datetime import timedelta
 from flask import Flask, current_app, jsonify, redirect, request, send_file
 
 from .config import Settings
-from .crypto import CryptoConfigError, encrypt_refresh_token
+from .crypto import CryptoConfigError, decrypt_refresh_token, encrypt_refresh_token
 from .db import connect_database
 from .demo_seed import DEMO_USER_EMAIL
 from .exporter import ExportLimitError, build_real_user_export
@@ -171,6 +171,53 @@ def register_routes(app: Flask) -> None:
             delete_session(connection, session.session_id)
 
         response = jsonify({"status": "demo_session_cleared"})
+        _clear_session_cookie(response, settings)
+        return response
+
+    @app.post("/auth/disconnect")
+    def disconnect_account():
+        settings = _settings()
+        session, response = _require_session()
+        if response is not None:
+            return response
+        if session.is_demo:
+            return jsonify({"error": "real_user_required"}), 403
+
+        refresh_token = None
+        user_storage_root = settings.user_storage_root / str(session.user_id)
+        with connect_database(settings.database_path) as connection:
+            gmail_row = connection.execute(
+                """
+                SELECT refresh_token_encrypted
+                FROM gmail_accounts
+                WHERE user_id = ?
+                """,
+                (session.user_id,),
+            ).fetchone()
+            if gmail_row is not None and gmail_row["refresh_token_encrypted"]:
+                refresh_token = decrypt_refresh_token(
+                    str(gmail_row["refresh_token_encrypted"]),
+                    settings.fernet_key,
+                )
+
+            connection.execute("DELETE FROM sessions WHERE user_id = ?", (session.user_id,))
+            connection.execute("DELETE FROM receipts WHERE user_id = ?", (session.user_id,))
+            connection.execute("DELETE FROM gmail_accounts WHERE user_id = ?", (session.user_id,))
+            connection.execute("DELETE FROM users WHERE id = ?", (session.user_id,))
+            connection.commit()
+
+        if user_storage_root.exists():
+            import shutil
+
+            shutil.rmtree(user_storage_root)
+
+        if refresh_token:
+            try:
+                _oauth_client().revoke_token(refresh_token)
+            except Exception:
+                pass
+
+        response = jsonify({"status": "disconnected"})
         _clear_session_cookie(response, settings)
         return response
 

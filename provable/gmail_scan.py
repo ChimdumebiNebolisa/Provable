@@ -159,10 +159,13 @@ class GmailScanExecutor:
         candidates: list[CandidateReceipt],
     ) -> None:
         written_files: list[Path] = []
+        seen_file_hashes: set[str] = set()
         connection = connect_database(self._settings.database_path)
         try:
             connection.execute("BEGIN")
             for candidate in candidates:
+                if candidate.file_sha256 in seen_file_hashes:
+                    continue
                 inserted = connection.execute(
                     """
                     INSERT OR IGNORE INTO receipts(
@@ -201,6 +204,7 @@ class GmailScanExecutor:
                 candidate.storage_path.parent.mkdir(parents=True, exist_ok=True)
                 candidate.storage_path.write_bytes(candidate.file_bytes)
                 written_files.append(candidate.storage_path)
+                seen_file_hashes.add(candidate.file_sha256)
 
             connection.commit()
         except Exception:

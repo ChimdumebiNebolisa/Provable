@@ -216,3 +216,85 @@ def test_scan_deduplicates_by_sha_and_skips_low_score(app, client, settings):
     assert gmail_receipt_count == 2
     assert list(listed_receipts.keys()) == ["2024-02"]
     assert len(listed_receipts["2024-02"]) == 2
+
+
+@dataclass
+class DuplicateShaGmailClient(FakeGmailClient):
+    def list_messages(self, *, access_token: str, after_date) -> list[str]:
+        self.queried_after_dates.append(after_date.isoformat())
+        return ["message-1", "message-4"]
+
+    def get_message(self, *, access_token: str, message_id: str) -> dict:
+        if message_id == "message-4":
+            return {
+                "id": "message-4",
+                "internalDate": "1706745600000",
+                "payload": {
+                    "headers": [
+                        {"name": "Subject", "value": "Receipt copy"},
+                        {"name": "From", "value": "Example Store <billing@example-store.com>"},
+                    ],
+                    "parts": [
+                        {
+                            "filename": "receipt-copy.pdf",
+                            "mimeType": "application/pdf",
+                            "body": {"attachmentId": "attachment-4"},
+                        }
+                    ],
+                },
+            }
+        return super().get_message(access_token=access_token, message_id=message_id)
+
+    def get_attachment(
+        self,
+        *,
+        access_token: str,
+        message_id: str,
+        attachment_id: str,
+        filename: str,
+        mime_type: str,
+    ) -> GmailAttachmentPayload:
+        if attachment_id == "attachment-4":
+            return GmailAttachmentPayload(
+                attachment_id=attachment_id,
+                filename=filename,
+                mime_type=mime_type,
+                data=b"%PDF-high-confidence%",
+            )
+        return super().get_attachment(
+            access_token=access_token,
+            message_id=message_id,
+            attachment_id=attachment_id,
+            filename=filename,
+            mime_type=mime_type,
+        )
+
+
+def test_scan_skips_distinct_gmail_ids_when_file_sha_matches(app, client, settings):
+    fake_oauth = FakeOAuthClient()
+    fake_gmail = DuplicateShaGmailClient()
+    app.config["PROVABLE_OAUTH_CLIENT"] = fake_oauth
+    app.config["PROVABLE_SCAN_MANAGER"] = ScanManager(
+        settings=settings,
+        executor=GmailScanExecutor(
+            settings=settings,
+            oauth_client=fake_oauth,
+            gmail_client=fake_gmail,
+        ),
+    )
+
+    _connect_real_user(client)
+    _wait_for_scan_completion(client)
+
+    with sqlite3.connect(settings.database_path) as connection:
+        gmail_receipts = connection.execute(
+            """
+            SELECT gmail_message_id, file_sha256
+            FROM receipts
+            WHERE source = 'gmail_scan'
+            ORDER BY gmail_message_id
+            """
+        ).fetchall()
+
+    assert len(gmail_receipts) == 1
+    assert gmail_receipts[0][0] == "message-1"

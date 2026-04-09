@@ -6,6 +6,7 @@ from urllib.parse import parse_qs, urlparse
 
 from provable.crypto import decrypt_refresh_token
 from provable.oauth import GoogleIdentity, OAuthTokens
+from provable.scan import NoOpScanExecutor, ScanManager
 
 
 @dataclass
@@ -36,6 +37,10 @@ class FakeOAuthClient:
 
 def test_auth_login_redirects_with_state_cookie(app, client):
     app.config["PROVABLE_OAUTH_CLIENT"] = FakeOAuthClient()
+    app.config["PROVABLE_SCAN_MANAGER"] = ScanManager(
+        settings=app.config["PROVABLE_SETTINGS"],
+        executor=NoOpScanExecutor(),
+    )
 
     response = client.get("/auth/login")
 
@@ -49,6 +54,10 @@ def test_auth_login_redirects_with_state_cookie(app, client):
 
 def test_auth_callback_rejects_invalid_state(app, client):
     app.config["PROVABLE_OAUTH_CLIENT"] = FakeOAuthClient()
+    app.config["PROVABLE_SCAN_MANAGER"] = ScanManager(
+        settings=app.config["PROVABLE_SETTINGS"],
+        executor=NoOpScanExecutor(),
+    )
     client.get("/auth/login")
 
     response = client.get("/auth/callback?state=wrong-state&code=test-code")
@@ -60,6 +69,10 @@ def test_auth_callback_rejects_invalid_state(app, client):
 def test_auth_callback_creates_real_user_session_and_encrypted_token(app, client, settings):
     fake_oauth = FakeOAuthClient()
     app.config["PROVABLE_OAUTH_CLIENT"] = fake_oauth
+    app.config["PROVABLE_SCAN_MANAGER"] = ScanManager(
+        settings=settings,
+        executor=NoOpScanExecutor(),
+    )
 
     login_response = client.get("/auth/login")
     state = parse_qs(urlparse(login_response.headers["Location"]).query)["state"][0]
@@ -95,6 +108,10 @@ def test_auth_callback_creates_real_user_session_and_encrypted_token(app, client
 
 def test_auth_callback_keeps_single_gmail_account_per_user(app, client, settings):
     app.config["PROVABLE_OAUTH_CLIENT"] = FakeOAuthClient()
+    app.config["PROVABLE_SCAN_MANAGER"] = ScanManager(
+        settings=settings,
+        executor=NoOpScanExecutor(),
+    )
 
     first_login = client.get("/auth/login")
     first_state = parse_qs(urlparse(first_login.headers["Location"]).query)["state"][0]

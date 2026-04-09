@@ -199,7 +199,7 @@ def register_routes(app: Flask) -> None:
                   high_confidence,
                   source
                 FROM receipts
-                WHERE user_id = ?
+                WHERE user_id = ? AND high_confidence = 1
                 ORDER BY receipt_date DESC, vendor ASC, id ASC
                 """,
                 (session.user_id,),

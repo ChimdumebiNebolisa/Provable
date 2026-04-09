@@ -94,6 +94,22 @@ class GoogleOAuthClient:
             email=str(payload["email"]).lower(),
         )
 
+    def refresh_access_token(self, refresh_token: str) -> str:
+        self._ensure_configured()
+        response = self._session.post(
+            GOOGLE_TOKEN_URL,
+            data={
+                "client_id": self._settings.google_client_id,
+                "client_secret": self._settings.google_client_secret,
+                "refresh_token": refresh_token,
+                "grant_type": "refresh_token",
+            },
+            timeout=20,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        return str(payload["access_token"])
+
     def _ensure_configured(self) -> None:
         if not (
             self._settings.google_client_id
